@@ -1,0 +1,97 @@
+using Microsoft.Identity.Client;
+using System.Net.Http.Headers;
+using System.Text.Json;
+
+namespace PowerApps.Samples
+{
+    /// <summary>
+    /// This program deletes a user's access to accounts that don't belong to them (bulk unshare).
+    /// </summary>
+    class Program
+    {
+        static async Task Main()
+        {
+            string resource = "https://abbtestsalesservice.crm.dynamics.com";
+            var clientId = "51f81489-12ee-4a9e-aaae-a2591f45987d";
+            var redirectUri = "http://localhost"; // Loopback for the interactive login.
+
+            #region Authentication
+
+            var authBuilder = PublicClientApplicationBuilder.Create(clientId)
+                           .WithAuthority(AadAuthorityAudience.AzureAdMultipleOrgs)
+                           .WithRedirectUri(redirectUri)
+                           .Build();
+            var scope = resource + "/user_impersonation";
+            string[] scopes = { scope };
+
+            AuthenticationResult token =
+               await authBuilder.AcquireTokenInteractive(scopes).ExecuteAsync();
+            #endregion Authentication
+
+            #region Client configuration
+
+            var client = new HttpClient
+            {
+                BaseAddress = new Uri(resource + "/api/data/v9.2/"),
+                Timeout = new TimeSpan(0, 2, 0)    // Standard two minute timeout on web service calls.
+            };
+
+            HttpRequestHeaders headers = client.DefaultRequestHeaders;
+            headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
+            headers.Add("OData-MaxVersion", "4.0");
+            headers.Add("OData-Version", "4.0");
+            headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            #endregion Client configuration
+
+            string userId = "7873ced2-675e-ed11-9562-000d3a9bc9ed";
+
+            // Step 1: Retrieve the user's name
+            var userResponse = await client.GetAsync($"systemusers({userId})?$select=fullname");
+            userResponse.EnsureSuccessStatusCode();
+            var userContent = await userResponse.Content.ReadAsStringAsync();
+            var userDocument = JsonDocument.Parse(userContent);
+            string userName = userDocument.RootElement.GetProperty("fullname").GetString();
+
+            Console.WriteLine($"User: {userName}");
+
+            // Step 2: Retrieve the list of accounts shared with the specific user using the web API
+            var response = await client.GetAsync($"principalobjectaccessset?$filter=principalid eq {userId} and objectid ne {userId} and objecttypecode eq 'account'");
+            response.EnsureSuccessStatusCode();
+            var content = await response.Content.ReadAsStringAsync();
+            var sharedAccounts = JsonDocument.Parse(content).RootElement.GetProperty("value");
+
+            // Step 3: Print the list of shared accounts
+            Console.WriteLine("List of shared accounts:");
+            foreach (var account in sharedAccounts.EnumerateArray())
+            {
+                string objectId = account.GetProperty("objectid").GetString();
+                Console.WriteLine($"Account ID: {objectId}");
+
+                // Step 4: Unshare the account
+                await UnshareAccount(client, userId, objectId);
+                Console.WriteLine($"Unshared account: {objectId}");
+            }
+        }
+
+        static async Task UnshareAccount(HttpClient client, string userId, string accountId)
+        {
+            // Find the specific principalobjectaccess record to delete
+            var query = $"principalobjectaccessset?$filter=principalid eq {userId} and objectid eq {accountId}";
+            var response = await client.GetAsync(query);
+            response.EnsureSuccessStatusCode();
+            var content = await response.Content.ReadAsStringAsync();
+            var result = JsonDocument.Parse(content).RootElement.GetProperty("value");
+
+            // Assuming there's only one result (should be, based on principalid and objectid filter)
+            if (result.GetArrayLength() > 0)
+            {
+                var recordId = result[0].GetProperty("principalobjectaccessid").GetString();
+
+                // principalobjectaccessid: The actual ID of the "share"
+                Console.WriteLine($"Object access ID: {recordId}");  
+                //var deleteResponse = await client.DeleteAsync($"principalobjectaccessset({recordId})");
+                //deleteResponse.EnsureSuccessStatusCode();
+            }
+        }
+    }
+}
